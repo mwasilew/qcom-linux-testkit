@@ -113,6 +113,7 @@ done
 
 log_info ""
 log_info "=== Overall CPUFreq Validation Result ==="
+echo "$test_path/$TESTNAME.res"
 if [ "$overall_pass" -eq 0 ]; then
     printf "${GREEN}[OVERALL PASS]${NC} All CPUs validated successfully.\n"
     log_pass "$TESTNAME : Test Passed"
