@@ -1,0 +1,24 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: AUSanity
+    description: "Baseline AU Sanity test plan"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+params:
+    PID: 05c6
+
+run:
+    steps:
+        - DEBIANFRONTEND=noninteractive apt-get update
+        - DEBIANFRONTEND=noninteractive apt-get install -y usbutils python3
+        - lsusb
+        - cd USBDevice/Linux
+        - python3 run.py --pid "${PID}"
+
