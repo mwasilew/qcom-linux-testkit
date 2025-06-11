@@ -448,18 +448,6 @@ check_net_tools() {
     fi
 }
 
-# Get IP address using ifconfig or ip (fallback logic)
-get_ip_address() {
-    iface="$1"
-    ip=""
-    if command -v ifconfig >/dev/null 2>&1; then
-        ip=$(ifconfig "$iface" 2>/dev/null | awk '/inet / {print $2; exit}')
-    fi
-    if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
-        ip=$(ip addr show "$iface" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
-    fi
-    echo "$ip"
-}
 
 # Extracts WiFi SSID and password from arguments, env, or ssid_list.txt
 get_wifi_credentials() {
@@ -520,4 +508,68 @@ get_wifi_interface() {
     else
         return 1
     fi
+}
+
+# Get the IPv4 address for a given interface
+get_ip_address() {
+    iface="$1"
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 -o addr show "$iface" | awk '{print $4}' | cut -d/ -f1 | head -n1
+    elif command -v ifconfig >/dev/null 2>&1; then
+        ifconfig "$iface" 2>/dev/null | awk '/inet / {print $2}' | head -n1
+    fi
+}
+
+# Returns true (0) if interface is Ethernet type (type 1 in sysfs), false otherwise.
+is_ethernet_interface() {
+    iface="$1"
+    [ -f "/sys/class/net/$iface/type" ] && [ "$(cat "/sys/class/net/$iface/type")" = "1" ]
+}
+
+# Returns the names of all detected Ethernet interfaces (excluding loopback and common virtual types)
+get_ethernet_interfaces() {
+    for path in /sys/class/net/*; do
+        iface=$(basename "$path")
+        case "$iface" in
+            lo) continue ;;  # Loopback
+            docker*|br-*|veth*|virbr*|tap*|tun*|wlan*) continue ;;  # Common virtual & WiFi interfaces
+        esac
+        if is_ethernet_interface "$iface"; then
+            echo "$iface"
+        fi
+    done
+}
+
+# Returns the first detected Ethernet interface (or nothing if none found)
+get_ethernet_interface() {
+    get_ethernet_interfaces | head -n1
+}
+
+# Bring up interface with retries: always down before up
+bringup_interface() {
+    iface="$1"
+    retries="$2"
+    sleep_sec="$3"
+    i=0
+    while [ $i -lt "$retries" ]; do
+        if command -v ip >/dev/null 2>&1; then
+            ip link set "$iface" down
+            sleep 1
+            ip link set "$iface" up
+            sleep "$sleep_sec"
+            if ip link show "$iface" | grep -q "state UP"; then
+                return 0
+            fi
+        elif command -v ifconfig >/dev/null 2>&1; then
+            ifconfig "$iface" down
+            sleep 1
+            ifconfig "$iface" up
+            sleep "$sleep_sec"
+            if ifconfig "$iface" | grep -q "UP"; then
+                return 0
+            fi
+        fi
+        i=$((i + 1))
+    done
+    return 1
 }

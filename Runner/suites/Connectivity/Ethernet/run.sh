@@ -39,54 +39,53 @@ rm -f "$res_file"
  
 log_info "--------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
- 
+
+# Check for dependencies
 check_dependencies ip ping
- 
-IFACE="eth0"
+
+# Detect Ethernet interface dynamically using helper
+IFACE=$(get_ethernet_interface)
+if [ -z "$IFACE" ]; then
+    log_fail "No Ethernet interface found!"
+    echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
+log_info "Detected Ethernet interface: $IFACE"
+
 RETRIES=3
 SLEEP_SEC=3
- 
-# Check interface existence
-if ! ip link show "$IFACE" >/dev/null 2>&1; then
-    log_fail "Ethernet interface $IFACE not found"
-    echo "FAIL $TESTNAME" > "$res_file"
-    exit 1
-fi
- 
-# Bring up interface with retries
+
+# Bring up the interface with retries (always brings down first)
 log_info "Ensuring $IFACE is UP..."
-i=0
-while [ $i -lt $RETRIES ]; do
-    ip link set "$IFACE" up
-    sleep "$SLEEP_SEC"
-    if ip link show "$IFACE" | grep -q "state UP"; then
-        log_info "$IFACE is UP"
-        break
-    fi
-    log_warn "$IFACE is still DOWN (attempt $((i + 1))/$RETRIES)..."
-    i=$((i + 1))
-done
- 
-if [ $i -eq $RETRIES ]; then
+if ! bringup_interface "$IFACE" "$RETRIES" "$SLEEP_SEC"; then
     log_fail "Failed to bring up $IFACE after $RETRIES attempts"
-    echo "FAIL $TESTNAME" > "$res_file"
+    echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 fi
- 
+log_pass "$IFACE is UP"
+
+# Log the current IP address (if any)
+IPADDR=$(get_ip_address "$IFACE")
+if [ -n "$IPADDR" ]; then
+    log_info "IP Address for $IFACE: $IPADDR"
+else
+    log_warn "Could not retrieve IP address for $IFACE"
+fi
+
 # Ping test with retries
 log_info "Running ping test to 8.8.8.8 via $IFACE..."
 i=0
 while [ $i -lt $RETRIES ]; do
     if ping -I "$IFACE" -c 4 -W 2 8.8.8.8 >/dev/null 2>&1; then
         log_pass "Ethernet connectivity verified via ping"
-        echo "PASS $TESTNAME" > "$res_file"
+        echo "$TESTNAME PASS" > "$res_file"
         exit 0
     fi
     log_warn "Ping failed (attempt $((i + 1))/$RETRIES)... retrying"
     sleep "$SLEEP_SEC"
     i=$((i + 1))
 done
- 
+
 log_fail "Ping test failed after $RETRIES attempts"
-echo "FAIL $TESTNAME" > "$res_file"
+echo "$TESTNAME FAIL" > "$res_file"
 exit 1
