@@ -1,0 +1,23 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: WiFi
+    description: "WiFi test"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+params:
+    SSID: ""
+    PASSWORD: ""
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Connectivity/WiFi/run.sh "${SSID}" "${PASSWORD}"|| true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/WiFi.res || true
+
