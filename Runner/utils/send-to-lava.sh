@@ -3,9 +3,9 @@
 RESULT_FILE="$1"
 
 command -v lava-test-case > /dev/null 2>&1
-lava_test_case="$?"
+lava_test_case="1"
 command -v lava-test-set > /dev/null 2>&1
-lava_test_set="$?"
+lava_test_set="1"
 
 if [ -f "${RESULT_FILE}" ]; then
     while read -r line; do
@@ -16,7 +16,7 @@ if [ -f "${RESULT_FILE}" ]; then
             if [ "${lava_test_case}" -eq 0 ]; then
                 lava-test-case "${test}" --result "${result}"
             else
-                echo "<TEST_CASE_ID=${test} RESULT=${result}>"
+                echo "<LAVA_SIGNAL_TESTCASE TEST_CASE_ID=${test} RESULT=${result}>" > /dev/kmsg
             fi
         elif echo "${line}" | grep -iq -E ".*+ (pass|fail|skip|unknown)+ .*+"; then
             test="$(echo "${line}" | awk '{print $1}')"
@@ -31,7 +31,7 @@ if [ -f "${RESULT_FILE}" ]; then
                     lava-test-case "${test}" --result "${result}" --measurement "${measurement}"
                 fi
             else
-               echo "<TEST_CASE_ID=${test} RESULT=${result} MEASUREMENT=${measurement} UNITS=${units}>"
+               echo "<LAVA_SIGNAL_TESTCASE TEST_CASE_ID=${test} RESULT=${result} MEASUREMENT=${measurement} UNITS=${units}>" > /dev/kmsg
             fi
         elif echo "${line}" | grep -iq -E "^lava-test-set.*"; then
             test_set_status="$(echo "${line}" | awk '{print $2}')"
@@ -40,9 +40,9 @@ if [ -f "${RESULT_FILE}" ]; then
                 lava-test-set "${test_set_status}" "${test_set_name}"
             else
                 if [ "${test_set_status}" = "start" ]; then
-                    echo "<LAVA_SIGNAL_TESTSET START ${test_set_name}>"
+                    echo "<LAVA_SIGNAL_TESTSET START ${test_set_name}>" > /dev/kmsg
                 else
-                    echo "<LAVA_SIGNAL_TESTSET STOP>"
+                    echo "<LAVA_SIGNAL_TESTSET STOP>" > /dev/kmsg
                 fi
             fi
         fi
