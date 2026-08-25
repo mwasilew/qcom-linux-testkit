@@ -2669,17 +2669,159 @@ get_ip_address() {
     fi
 }
 
-# Run a command with a timeout (in seconds)
+# -------------------- Bounded command execution --------------------
+# Canonical run_bounded() return code, normalised across timeout(1)
+# implementations: GNU coreutils reports 124 when its signal ended the command,
+# BusyBox reports 128+signal, and both report 137 when the grace period had to
+# escalate to SIGKILL.
+RUN_BOUNDED_RC_TIMEDOUT=124
+
+# Seconds a command gets to react to the first signal before it is SIGKILLed.
+RUN_BOUNDED_KILL_GRACE="${RUN_BOUNDED_KILL_GRACE:-10}"
+
+# signum_for <name|number>
+# Maps a signal name to its number. timeout(1) implementations differ in which
+# signal names they accept, but every one of them accepts a number.
+signum_for() {
+    case "$1" in
+        INT|SIGINT|2)    printf '%s\n' 2 ;;
+        KILL|SIGKILL|9)  printf '%s\n' 9 ;;
+        TERM|SIGTERM|15) printf '%s\n' 15 ;;
+        *)               printf '%s\n' 15 ;;
+    esac
+}
+
+# timeout_supported
+# True when timeout(1) exists and accepts the options needed to bound a command
+# and escalate to SIGKILL. Only the short options are probed: GNU coreutils
+# accepts both short and long forms, BusyBox accepts only the short ones and
+# fails outright on --signal=/--kill-after=. Cached in RUN_BOUNDED_TIMEOUT_OK.
+timeout_supported() {
+    if [ -z "${RUN_BOUNDED_TIMEOUT_OK:-}" ]; then
+        if command -v timeout >/dev/null 2>&1 &&
+           timeout -s 15 -k 1 1 true >/dev/null 2>&1; then
+            RUN_BOUNDED_TIMEOUT_OK=1
+        else
+            RUN_BOUNDED_TIMEOUT_OK=0
+        fi
+    fi
+    [ "$RUN_BOUNDED_TIMEOUT_OK" = "1" ]
+}
+
+# bounded_timed_out <rc>
+# True when run_bounded() had to stop the command.
+bounded_timed_out() {
+    [ "$1" = "$RUN_BOUNDED_RC_TIMEDOUT" ]
+}
+
+# run_bounded_shell <secs> <signum> <command> [args...]
+# Pure-shell fallback for systems whose timeout(1) is unusable. Sends <signum>
+# after <secs>, then SIGKILL after RUN_BOUNDED_KILL_GRACE more seconds, so a
+# command that ignores the first signal is still stopped.
+#
+# Returns the command's own status, or RUN_BOUNDED_RC_TIMEDOUT if the watcher
+# had to act. The marker file is what distinguishes "the bound stopped it" from
+# "it happened to die of a signal on its own".
+run_bounded_shell() {
+    rbs_secs="$1"
+    rbs_signum="$2"
+    shift 2
+
+    # Start the command directly, not in a subshell: $! must be the command
+    # itself, otherwise the signals below land on a wrapper and the command
+    # they were meant for keeps running.
+    "$@" &
+    rbs_pid=$!
+    rbs_marker="${TMPDIR:-/tmp}/.run_bounded.$$.$rbs_pid"
+    rm -f "$rbs_marker"
+
+    (
+        rbs_i=0
+        while [ "$rbs_i" -lt "$rbs_secs" ]; do
+            kill -0 "$rbs_pid" 2>/dev/null || exit 0
+            sleep 1
+            rbs_i=$((rbs_i + 1))
+        done
+        kill -0 "$rbs_pid" 2>/dev/null || exit 0
+
+        : > "$rbs_marker"
+        kill -"$rbs_signum" "$rbs_pid" 2>/dev/null
+
+        rbs_j=0
+        while [ "$rbs_j" -lt "$RUN_BOUNDED_KILL_GRACE" ]; do
+            kill -0 "$rbs_pid" 2>/dev/null || exit 0
+            sleep 1
+            rbs_j=$((rbs_j + 1))
+        done
+        kill -9 "$rbs_pid" 2>/dev/null
+    ) &
+    rbs_watcher=$!
+
+    wait "$rbs_pid" 2>/dev/null
+    rbs_rc=$?
+
+    kill "$rbs_watcher" 2>/dev/null
+    wait "$rbs_watcher" 2>/dev/null
+
+    if [ -f "$rbs_marker" ]; then
+        rm -f "$rbs_marker"
+        return "$RUN_BOUNDED_RC_TIMEDOUT"
+    fi
+    return "$rbs_rc"
+}
+
+# run_bounded <secs> <signal> <command> [args...]
+# Runs <command> under a time bound, escalating to SIGKILL after
+# RUN_BOUNDED_KILL_GRACE seconds if it does not react to <signal>.
+#
+# The escalation is the point. A process blocked in a driver ioctl on wedged
+# hardware never reacts to SIGTERM, so a bound that only sends SIGTERM does not
+# bound anything: the command runs to completion, or forever.
+#
+# Returns the command's own exit status, or RUN_BOUNDED_RC_TIMEDOUT if the
+# bound stopped it. RUN_BOUNDED_RAW_RC keeps the pre-normalisation status,
+# which distinguishes "stopped on the first signal" from "ignored it and had to
+# be killed" - only the latter points at wedged hardware.
+run_bounded() {
+    rb_secs="$1"
+    rb_sig="$2"
+    shift 2
+
+    # A non-numeric or non-positive bound is invalid input, not a request to
+    # run unbounded.
+    case "$rb_secs" in ''|*[!0-9]*) rb_secs=10 ;; esac
+    [ "$rb_secs" -gt 0 ] 2>/dev/null || rb_secs=10
+
+    rb_signum=$(signum_for "$rb_sig")
+
+    if timeout_supported; then
+        timeout -s "$rb_signum" -k "$RUN_BOUNDED_KILL_GRACE" "$rb_secs" "$@"
+        rb_rc=$?
+    else
+        run_bounded_shell "$rb_secs" "$rb_signum" "$@"
+        rb_rc=$?
+    fi
+    # Consumed by callers that want the implementation's own status.
+    # shellcheck disable=SC2034
+    RUN_BOUNDED_RAW_RC="$rb_rc"
+
+    rb_killed=$((128 + rb_signum))
+    if [ "$rb_rc" = "124" ] || [ "$rb_rc" = "137" ] ||
+       [ "$rb_rc" = "$rb_killed" ]; then
+        rb_rc="$RUN_BOUNDED_RC_TIMEDOUT"
+    fi
+
+    return "$rb_rc"
+}
+
+# Run a command with a timeout (in seconds).
+#
+# Reports a timeout as RUN_BOUNDED_RC_TIMEDOUT (124), which is the status
+# callers already test for, and escalates to SIGKILL so a command that ignores
+# SIGTERM is actually stopped.
 run_with_timeout() {
-    timeout="$1"; shift
-    ( "$@" ) &
-    pid=$!
-    ( sleep "$timeout"; kill "$pid" 2>/dev/null ) &
-    watcher=$!
-    wait $pid 2>/dev/null
-    status=$?
-    kill $watcher 2>/dev/null
-    return $status
+    rwt_timeout="$1"; shift
+    run_bounded "$rwt_timeout" TERM "$@"
 }
 
 # Purpose: Run a command with a timeout and capture stdout and stderr.

@@ -1573,30 +1573,26 @@ video_run_once() {
         printf 'CMD=%s %s %s %s\n' "$VIDEO_APP" "--config" "$cfg" "--loglevel $lvl"
     } >>"$logf" 2>&1
 
-    if video_have_run_with_timeout; then
-        if run_with_timeout "$tmo" "$VIDEO_APP" --config "$cfg" --loglevel "$lvl" >>"$logf" 2>&1; then
-            :
-        else
-            rc=$?
-            if [ "$rc" -eq 124 ] 2>/dev/null; then
-                log_fail "[run] timeout after ${tmo}s"
-            else
-                log_fail "[run] $VIDEO_APP exited rc=$rc"
-            fi
-            printf 'END-RUN rc=%s\n' "$rc" >>"$logf"
-            grep -Eq "$suc" "$logf"
-            return $?
-        fi
+    # No unbounded path: $VIDEO_APP talks to the video hardware, and when that
+    # hardware wedges the app blocks in a driver ioctl and never returns.
+    if ! video_have_run_with_timeout; then
+        log_fail "[run] run_with_timeout unavailable; refusing to run $VIDEO_APP unbounded"
+        printf 'END-RUN rc=%s\n' "no-timeout" >>"$logf"
+        return 1
+    fi
+
+    if run_with_timeout "$tmo" "$VIDEO_APP" --config "$cfg" --loglevel "$lvl" >>"$logf" 2>&1; then
+        :
     else
-        if "$VIDEO_APP" --config "$cfg" --loglevel "$lvl" >>"$logf" 2>&1; then
-            :
+        rc=$?
+        if bounded_timed_out "$rc"; then
+            log_fail "[run] timeout after ${tmo}s"
         else
-            rc=$?
-            log_fail "[run] $VIDEO_APP exited rc=$rc (no timeout enforced)"
-            printf 'END-RUN rc=%s\n' "$rc" >>"$logf"
-            grep -Eq "$suc" "$logf"
-            return $?
+            log_fail "[run] $VIDEO_APP exited rc=$rc"
         fi
+        printf 'END-RUN rc=%s\n' "$rc" >>"$logf"
+        grep -Eq "$suc" "$logf"
+        return $?
     fi
 
     printf 'END-RUN rc=0\n' >>"$logf"
