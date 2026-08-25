@@ -2679,6 +2679,31 @@ RUN_BOUNDED_RC_TIMEDOUT=124
 # Seconds a command gets to react to the first signal before it is SIGKILLed.
 RUN_BOUNDED_KILL_GRACE="${RUN_BOUNDED_KILL_GRACE:-10}"
 
+# duration_to_secs <duration>
+# Accepts an integer number of seconds, optionally carrying a coreutils/BusyBox
+# style suffix (s, m, h, d), and prints the equivalent in plain seconds.
+# Prints nothing and returns 1 if the value cannot be parsed.
+#
+# Callers do pass suffixed values - Graphics/weston-simple-egl defaults to
+# DURATION=30s - so rejecting them as "not a number" silently shortens the test.
+duration_to_secs() {
+    dts_val="$1"
+    case "$dts_val" in
+        ''|*[!0-9smhd]*) return 1 ;;
+    esac
+    dts_num="${dts_val%[smhd]}"
+    case "$dts_num" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$dts_val" in
+        *m) dts_mul=60 ;;
+        *h) dts_mul=3600 ;;
+        *d) dts_mul=86400 ;;
+        *)  dts_mul=1 ;;
+    esac
+    printf '%s\n' "$((dts_num * dts_mul))"
+}
+
 # signum_for <name|number>
 # Maps a signal name to its number. timeout(1) implementations differ in which
 # signal names they accept, but every one of them accepts a number.
@@ -2709,9 +2734,11 @@ timeout_supported() {
 }
 
 # bounded_timed_out <rc>
-# True when run_bounded() had to stop the command.
+# True when a bounded run had to stop the command. Accepts the canonical
+# RUN_BOUNDED_RC_TIMEDOUT from run_bounded() and the legacy 143 that
+# run_with_timeout() still reports for backward compatibility.
 bounded_timed_out() {
-    [ "$1" = "$RUN_BOUNDED_RC_TIMEDOUT" ]
+    [ "$1" = "$RUN_BOUNDED_RC_TIMEDOUT" ] || [ "$1" = "143" ]
 }
 
 # run_bounded_shell <secs> <signum> <command> [args...]
@@ -2787,10 +2814,13 @@ run_bounded() {
     rb_sig="$2"
     shift 2
 
-    # A non-numeric or non-positive bound is invalid input, not a request to
-    # run unbounded.
-    case "$rb_secs" in ''|*[!0-9]*) rb_secs=10 ;; esac
-    [ "$rb_secs" -gt 0 ] 2>/dev/null || rb_secs=10
+    # Normalise the bound to plain seconds. A value that cannot be parsed, or
+    # is not positive, is invalid input - not a request to run unbounded.
+    rb_secs="$(duration_to_secs "$rb_secs")" || rb_secs=""
+    if [ -z "$rb_secs" ] || [ "$rb_secs" -le 0 ] 2>/dev/null; then
+        log_warn "run_bounded: unusable time bound, defaulting to 10s"
+        rb_secs=10
+    fi
 
     rb_signum=$(signum_for "$rb_sig")
 
@@ -2814,14 +2844,29 @@ run_bounded() {
     return "$rb_rc"
 }
 
-# Run a command with a timeout (in seconds).
+# Run a command with a timeout.
 #
-# Reports a timeout as RUN_BOUNDED_RC_TIMEDOUT (124), which is the status
-# callers already test for, and escalates to SIGKILL so a command that ignores
-# SIGTERM is actually stopped.
+# Escalates to SIGKILL so a command that ignores SIGTERM is actually stopped,
+# but keeps the status its callers have always seen: a command stopped by the
+# bound reports 143, exactly as the previous SIGTERM-only implementation did.
+# Graphics/weston-simple-egl and friends accept 0|143 as success and treat
+# anything else as a failure, so this status is part of the contract.
+#
+# A command that has to be SIGKILLed after ignoring SIGTERM also reports 143:
+# from the caller's point of view it ran for its allotted time and was then
+# stopped, which is what these tests are asking for. What changes is that it is
+# now actually stopped instead of running to completion unbounded.
+# RUN_BOUNDED_RAW_RC still distinguishes the two for anything that cares.
+#
+# New code should prefer run_bounded() and bounded_timed_out().
 run_with_timeout() {
     rwt_timeout="$1"; shift
     run_bounded "$rwt_timeout" TERM "$@"
+    rwt_rc=$?
+    if [ "$rwt_rc" = "$RUN_BOUNDED_RC_TIMEDOUT" ]; then
+        return 143
+    fi
+    return "$rwt_rc"
 }
 
 # Purpose: Run a command with a timeout and capture stdout and stderr.
